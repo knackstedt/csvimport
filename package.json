@@ -1,0 +1,20 @@
+{
+  "name": "colossal-csv-importer",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "node --nolazy -r ts-node/register --max-old-space-size=40000 src/import.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@fast-csv/format": "^5.0.2",
+    "@fast-csv/parse": "^5.0.2",
+    "csv-parse": "^5.6.0",
+    "csv-parser": "^3.2.0",
+    "fast-csv": "^5.0.2",
+    "surrealdb": "^1.1.0",
+    "ts-node": "^10.9.2",
+    "tslib": "^2.8.1",
+    "typescript": "^5.7.3",
+    "yocto-spinner": "^0.2.0"
+  }
+}

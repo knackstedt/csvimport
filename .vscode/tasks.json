@@ -1,0 +1,40 @@
+{
+    // For more information, visit: https://go.microsoft.com/fwlink/?LinkId=733558
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "▶ surrealdb",
+            "type": "shell",
+            "command": "surreal",
+            "args": [
+                "start",
+                "--user=root",
+                "--pass=root",
+                "-A",
+                "surrealkv:./database"
+            ],
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "surrealdb",
+                "pattern": [
+                    {
+                        "severity": 1,
+                        "file": 2,
+                        "message": 3,
+                        "kind": "file",
+                        "regexp": " (ERROR) surreal::([^:]+): ([^\n]+)"
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": {
+                        "regexp": "INFO surreal::env: Running"
+                    },
+                    "endsPattern": {
+                        "regexp": "INFO surrealdb::net: Started web server"
+                    }
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,28 @@
+{
+    "compileOnSave": false,
+    "compilerOptions": {
+        "strict": false,
+        "noImplicitOverride": true,
+        "noPropertyAccessFromIndexSignature": true,
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+        "sourceMap": true,
+        "declaration": false,
+        "downlevelIteration": false,
+        "experimentalDecorators": true,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        "skipLibCheck": true,
+        "resolveJsonModule": true,
+        "moduleResolution": "node",
+        "importHelpers": true,
+        "target": "ES2022",
+        "module": "commonjs",
+        "lib": [
+            "es2020"
+        ],
+        "typeRoots": [
+            "./node_modules/@types" //this where npm packages containing types are located
+        ]
+    }
+}

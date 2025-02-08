@@ -1,0 +1,1 @@
+All CSV files to import should be placed in this folder.
