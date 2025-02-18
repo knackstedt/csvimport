@@ -2,7 +2,8 @@
   "name": "colossal-csv-importer",
   "version": "0.0.0",
   "scripts": {
-    "dev": "node --nolazy -r ts-node/register --max-old-space-size=40000 src/import.ts"
+    "dev": "node --nolazy -r ts-node/register --max-old-space-size=40000 src/import.ts",
+    "build": "tsc"
   },
   "private": true,
   "dependencies": {
