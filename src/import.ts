@@ -4,6 +4,7 @@ import { parse } from '@fast-csv/parse';
 
 import Surreal from 'surrealdb';
 import yoctoSpinner from 'yocto-spinner';
+import { countNewlines, printTime } from './utils';
 
 const SURREAL_URL = process.env["SURREAL_URL"] || "ws://127.0.0.1:8000";
 const SURREAL_USERNAME = process.env["SURREAL_USERNAME"] || "root";
@@ -18,10 +19,17 @@ const injectSourceTableAsField = true;
 const sourceTableField = "_source"
 const sendBellBetweenFiles = true;
 const clearTableBeforeInsert = false;
+const terminalRefreshRate = parseInt(process.env['CSV_TERMINAL_REFRESH_INTERVAL'] || '50');
+
+const calculateChecksum = false;
+// Algorithm to use when `calculateChecksum` is enabled.
+const rowHashAlgorithm = "sha256"; 
+// MUST have calculateChecksum enabled.
 const embedSrcRowSha = false; // embed the source record's md5/sha sum (for signature verification...?)
-const rowHashAlgorithm = "sha256"; // checksum when `embedSrcRowSha` is provided.
 const checksumField = "_sha"; // Column name in the table for the checksum field.
-const deduplicate = true; // de-duplicate records based on their shasum. TODO.
+// de-duplicate records based on their shasum. This makes their ID a hash of their data.
+// MUST have calculateChecksum enabled.
+const deduplicate = true; 
 
 
 // List of fields to index during the import
@@ -35,34 +43,6 @@ const indexFields: {
     fields: "parameterDesc",
     isUnique: false
 }];
-
-function countNewlines(csvFilename) {
-    const fileStream = fs.createReadStream('./data/' + csvFilename, { highWaterMark: 512 * 1024 });
-    let count = 0;
-    const td = new TextDecoder();
-    return new Promise<number>((res, rej) => {
-        fileStream.on("data", data => {
-            const text = td.decode(data as Buffer);
-            count += text.match(/\n/g).length;
-        })
-        fileStream.on("end", () => {
-            res(count);
-        })
-    })
-}
-
-const printTime = (duration: number) => {
-    let milliseconds = Math.floor((duration % 1000) / 100);
-    let seconds = Math.floor((duration / 1000) % 60);
-    let minutes = Math.floor((duration / (1000 * 60)) % 60);
-    let hours = Math.floor((duration / (1000 * 60 * 60)) % 24);
-
-    hours = (hours < 10) ? 0 + hours : hours;
-    minutes = (minutes < 10) ? 0 + minutes : minutes;
-    seconds = (seconds < 10) ? 0 + seconds : seconds;
-
-    return (hours ? (hours + "h ") : '') + minutes + "m " + seconds + "." + milliseconds + "s";
-}
 
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
@@ -79,9 +59,13 @@ const WHITE = RESET + "\x1b[37m";
 const GRAY = RESET + "\x1b[30m";
 
 const spinner = yoctoSpinner({});
-const start = Date.now();
+let start: number;
 let totalInsertions = 0;
-let csvFiles: string[];
+let csvFiles: {
+    path: string,
+    entries: number
+}[];
+let totalTargetInsertions: number;
 
 (async() => {
     const db = new Surreal();
@@ -98,13 +82,24 @@ let csvFiles: string[];
         namespace,
     });
 
+
     console.log("Finding CSV files…");
     const dirFiles = fs.readdirSync("./data");
-    csvFiles = dirFiles.filter(f => f.endsWith(".csv"));
+    const csvFileNames = dirFiles.filter(f => f.endsWith(".csv"));
+    csvFiles = await Promise.all(csvFileNames.map(async fn => {
+        return {
+            path: fn,
+            entries: (await countNewlines(fn)) - 1
+        }
+    }));
+    totalTargetInsertions = csvFiles.map(c => c.entries).reduce((a, b) => a+b, 0);
     console.log("Found " + CYAN + csvFiles.length.toLocaleString() + GRAY + " CSV files");
+    console.log("For a total of " + CYAN + totalTargetInsertions.toLocaleString() + GRAY + " records");
+
+    const start = Date.now();
     
     for (let i = 0; i < csvFiles.length; i++) {
-        const csvFilename = csvFiles[i];
+        const csvFilename = csvFiles[i].path;
         const table = targetTablename || csvFilename;
         const fileStart = Date.now();
         let targetLineCount = 0;
@@ -125,8 +120,8 @@ let csvFiles: string[];
             }
     
             console.log("Reading CSV file " + CYAN + csvFilename + GRAY + "…");
-            targetLineCount = await countNewlines(csvFilename);
-            console.log("Found " + GREEN + (targetLineCount -1).toLocaleString() + GRAY + " records in " + CYAN + csvFilename + RESET);
+            targetLineCount = csvFiles[i].entries;
+            console.log("Found " + GREEN + targetLineCount.toLocaleString() + GRAY + " records in " + CYAN + csvFilename + RESET);
     
             spinner.start();
     
@@ -170,48 +165,60 @@ let csvFiles: string[];
                     GRAY + "eta",
                     printTime(timeEstimateRemaining) + GRAY
                 ].join(" ");
-            }, 50);
-    
+            }, terminalRefreshRate);
     
             parser.on("data", (data) => {
                 // Generate a shasum of the record -- this can be used as the primary key instead of 
                 // a random one generated upon insertion.
-                if (embedSrcRowSha) {
+                if (calculateChecksum) {
                     const checksum = crypto.hash(rowHashAlgorithm, JSON.stringify(data));
-                    data[checksumField] = checksum;
+
+                    if (embedSrcRowSha) {
+                        data[checksumField] = checksum;
+                    }
+
+                    if (deduplicate) {
+                        data.id = checksum;
+                    }
                 }
                 if (injectSourceTableAsField) {
                     data[sourceTableField] = csvFilename;
                 }
                 
                 let p = db.insert(table, data)
-                    .then(function () { rowsInserted++; totalInsertions++ });
+                    .then(() => { rowsInserted++; totalInsertions++ });
     
                 // Record the promise and purge from the promises array
                 insertPromises.push(p);
                 p.finally(() => { insertPromises.splice(insertPromises.indexOf(p), 1) });
     
+                // If we start getting more promises than our target limit, we'll
+                // pause the source data stream until we've dropped below our threshold.
                 if (insertPromises.length > 20) {
                     fileStream.pause();
                 }
             })
             parser.on("error", err => {
+                // TODO: What happens to invalid records?
                 console.error(err);
             })
     
+            // Wait for the data stream to complete
             await new Promise((res, rej) => {
-                dataStream.on("end", () => {
+                // datastream.on("end") ?
+                // Do we need to explicitly call something to tell the parser it's done with it's work?
+                parser.on("end", () => {
                     spinner.stop();
                     console.log([
                         "Successfully Imported",
                         GREEN + rowsInserted.toLocaleString() + GRAY,
                         "of",
                         CYAN + targetLineCount.toLocaleString(),
-                        BLUE + (rowsInserted / targetLineCount * 100).toFixed(2) + '%',
+                        BLUE + (rowsInserted / targetLineCount * 100) + '%',
                         GRAY + "records from",
                         '"' + CYAN + csvFilename + GRAY +'"',
                         "in",
-                        YELLOW + printTime(Date.now() - start)
+                        YELLOW + printTime(Date.now() - fileStart) + GRAY
                     ].join(" "));
                     clearInterval(_i);
     
@@ -228,6 +235,7 @@ let csvFiles: string[];
             }
         }
         catch(ex) {
+            spinner.stop();
             console.error(ex);
             console.error([
                 "Failed to complete import of " + RED + csvFilename,
@@ -236,21 +244,33 @@ let csvFiles: string[];
                 CYAN + targetLineCount.toLocaleString() + GRAY + " total",
                 BLUE + (rowsInserted / targetLineCount * 100).toFixed(2) + '%',
                 GRAY + "records from",
-                '"' + CYAN + csvFilename + GRAY + '"',
+                CYAN + csvFilename + GRAY,
                 "in",
-                YELLOW + printTime(Date.now() - fileStart)
+                YELLOW + printTime(Date.now() - fileStart) + GRAY
             ].join(" "));
             throw ex;
         }
     }
 
+    console.error([
+        "Bulk insertion job " + GREEN + "succeeded" + GRAY +".\n",
+        GRAY + "Imported " + GREEN + totalInsertions + GRAY,
+        "of",
+        BLUE + totalTargetInsertions + GRAY,
+        "from " + CYAN + csvFiles + GRAY + "total files.\n",
+        "in " + YELLOW + printTime(Date.now() - start) + RESET
+    ].join(" "));
+
     process.exit(0);
 })().catch(err => {
+    spinner.stop();
     console.error([
-        "Bulk insertion job " + RED + "FAILED.\n",
-        GRAY + "Inserted " + GREEN + totalInsertions + GRAY,
-        "From " + CYAN + csvFiles + GRAY + "total files.\n",
-        "In " + YELLOW + printTime(Date.now() - start)
+        "Bulk insertion job " + RED + "failed" + GRAY + ".\n",
+        GRAY + "Imported " + GREEN + totalInsertions + GRAY,
+        "of",
+        BLUE + totalTargetInsertions + GRAY,
+        "from " + CYAN + csvFiles + GRAY + "total files.\n",
+        "in " + YELLOW + printTime(Date.now() - start) + RESET
     ].join(" "));
     process.exit(1);
 });
