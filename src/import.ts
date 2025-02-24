@@ -1,10 +1,13 @@
-import fs from "fs";
+import fs from "fs/promises";
+import { createReadStream } from "fs";
 import crypto from "crypto";
-import { parse } from '@fast-csv/parse';
 
 import Surreal from 'surrealdb';
+import { parse } from '@fast-csv/parse';
 import yoctoSpinner from 'yocto-spinner';
-import { countNewlines, printTime } from './utils';
+
+import { countNewlines, fingerPrintCSV, printTime } from './utils';
+import { BLUE, CYAN, GRAY, GREEN, RED, RESET, YELLOW } from './ansi';
 
 const SURREAL_URL = process.env["SURREAL_URL"] || "ws://127.0.0.1:8000";
 const SURREAL_USERNAME = process.env["SURREAL_USERNAME"] || "root";
@@ -15,22 +18,33 @@ const namespace = process.env["SURREAL_TARGET_NAMESPACE"] || "test";
 
 // If not specified, each record in the CSV file will be 
 const targetTablename = process.env["CSV_IMPORT_TABLENAME"] || "";
-const injectSourceTableAsField = true;
-const sourceTableField = "_source"
-const sendBellBetweenFiles = true;
-const clearTableBeforeInsert = false;
+const injectSourceTableAsField: boolean = JSON.parse(process.env['CSV_INJECT_SOURCE_AS_FIELD']?.toLowerCase() || 'true');
+const sourceTableField = process.env['CSV_SOURCE_TABLE_FIELDNAME'] || "_source"
+const sendBellBetweenFiles: boolean = JSON.parse(process.env['CSV_BELL_BETWEEN_FILES']?.toLowerCase() || 'false');
+const sendBellAtCompletion: boolean = JSON.parse(process.env['CSV_BELL_ON_FINISH']?.toLowerCase() || 'false');
+const clearTableBeforeInsert: boolean = JSON.parse(process.env['CSV_CLEAR_TABLE_BEFORE_INSERT']?.toLowerCase() || 'false');
 const terminalRefreshRate = parseInt(process.env['CSV_TERMINAL_REFRESH_INTERVAL'] || '50');
+const countRecordsToInsertAtStart: boolean = JSON.parse(process.env['CSV_COUNT_RECORDS_BEFORE_INSERT']?.toLowerCase() || 'true');
 
-const calculateChecksum = false;
+// Target number of bytes to read on the CSV file. 
+// Should be enough bytes to include 2 lines at any given time.
+// default 512k
+// larger values **will** cause the program to hang during read operations.
+const highWaterMark = parseInt(process.env['CSV_READER_HIGHWATERMARK']) || (512 * 1024);
+
+const calculateChecksum: boolean = JSON.parse(process.env['CSV_CALCULATE_RECORD_CHECKSUM']?.toLowerCase() || 'true');
 // Algorithm to use when `calculateChecksum` is enabled.
-const rowHashAlgorithm = "sha256"; 
+const rowHashAlgorithm = process.env['CSV_CHECKSUM_ALGORITHM'] || "sha256"; 
 // MUST have calculateChecksum enabled.
-const embedSrcRowSha = false; // embed the source record's md5/sha sum (for signature verification...?)
-const checksumField = "_sha"; // Column name in the table for the checksum field.
+const checksumField = process.env['CSV_CHECKSUM_COLUMN_NAME'] || "_sha"; // Column name in the table for the checksum field.
 // de-duplicate records based on their shasum. This makes their ID a hash of their data.
 // MUST have calculateChecksum enabled.
-const deduplicate = true; 
+const useChecksumAsId: boolean = JSON.parse(process.env['CSV_USE_CHECKSUM_AS_ID']?.toLowerCase() || 'true');
 
+
+// Marginally increase insert rate at the cost of memory. 
+// defaults to 40.
+const maxInsertPromises = 40;
 
 // List of fields to index during the import
 // https://surrealdb.com/docs/surrealql/statements/define/indexes
@@ -38,25 +52,14 @@ const indexFields: {
     indexName: string,
     fields: string,
     isUnique: boolean
-}[] = [{
-    indexName: "paramDesc",
-    fields: "parameterDesc",
-    isUnique: false
-}];
+}[] = [];
+// [{
+//     indexName: "paramDesc",
+//     fields: "parameterDesc SEARCH ANALYZER ascii BM25 HIGHLIGHTS CONCURRENTLY",
+//     isUnique: false
+// }];
 
-const BOLD = "\x1b[1m";
-const RESET = "\x1b[0m";
-const ITALICIZE = "\x1b[3m";
-const UNDERLINE = "\x1b[4m";
 
-const RED = RESET + "\x1b[31m";
-const GREEN = RESET + BOLD + "\x1b[32m";
-const YELLOW = RESET + "\x1b[33m";
-const BLUE = RESET + "\x1b[34m";
-const MAGENTA = RESET + "\x1b[35m";
-const CYAN = RESET + BOLD + "\x1b[36m";
-const WHITE = RESET + "\x1b[37m";
-const GRAY = RESET + "\x1b[30m";
 
 const spinner = yoctoSpinner({});
 let start: number;
@@ -65,12 +68,12 @@ let csvFiles: {
     path: string,
     entries: number
 }[];
-let totalTargetInsertions: number;
+let targetInsertionsForDataset: number;
 
 (async() => {
     const db = new Surreal();
 
-    console.log(GRAY +"Connecting to Surreal…");
+    console.log(GRAY + "Connecting to Surreal…");
 
     await db.connect(SURREAL_URL);
     await db.signin({
@@ -82,86 +85,136 @@ let totalTargetInsertions: number;
         namespace,
     });
 
+    await db.query(`DEFINE NAMESPACE IF NOT EXISTS \`${namespace}\``);
+    await db.query(`DEFINE DATABASE IF NOT EXISTS \`${database}\``);
 
-    console.log("Finding CSV files…");
-    const dirFiles = fs.readdirSync("./data");
-    const csvFileNames = dirFiles.filter(f => f.endsWith(".csv"));
-    csvFiles = await Promise.all(csvFileNames.map(async fn => {
-        return {
-            path: fn,
-            entries: (await countNewlines(fn)) - 1
+    const processStart = Date.now();
+
+    spinner.start();
+    spinner.text = "Scanning for CSV files…";
+    const filesInDataDir = await fs.readdir("./data");
+    const csvFilesInDataDir = filesInDataDir.filter(f => f.endsWith(".csv"));
+    spinner.stop();
+
+    console.log(`Found ${GREEN}${csvFilesInDataDir.length.toLocaleString()}${GRAY} CSV files`);
+
+    if (countRecordsToInsertAtStart) {
+        // Count all of the records in the entire folder before starting the import 
+        csvFiles = [];
+        for (let i = 0; i < csvFilesInDataDir.length; i++) {
+            const fn = csvFilesInDataDir[i];
+            spinner.start();
+            const lines = (await countNewlines(fn, spinner, terminalRefreshRate)) - 1;
+            spinner.stop();
+            console.log(`${CYAN}(${(i+1).toLocaleString()}/${csvFilesInDataDir.length.toLocaleString()}) ${GRAY}Found ${GREEN}${lines.toLocaleString()}${GRAY} records in ${CYAN}${fn}${GRAY}`);
+
+            csvFiles.push({
+                path: fn,
+                entries: lines
+            });
         }
-    }));
-    totalTargetInsertions = csvFiles.map(c => c.entries).reduce((a, b) => a+b, 0);
-    console.log("Found " + CYAN + csvFiles.length.toLocaleString() + GRAY + " CSV files");
-    console.log("For a total of " + CYAN + totalTargetInsertions.toLocaleString() + GRAY + " records");
+        targetInsertionsForDataset = csvFiles.map(c => c.entries).reduce((a, b) => a + b, 0);
 
-    const start = Date.now();
+        console.log(`Found ${GREEN}${targetInsertionsForDataset.toLocaleString()}${GRAY} total records in ${CYAN}${csvFilesInDataDir.length.toLocaleString()}${GRAY} CSV files`);
+    }
+    else {
+        csvFiles = await Promise.all(csvFilesInDataDir.map(async fn => {
+            return {
+                path: fn,
+                entries: null
+            };
+        }));
+    }
+
     
     for (let i = 0; i < csvFiles.length; i++) {
-        const csvFilename = csvFiles[i].path;
-        const table = targetTablename || csvFilename;
-        const fileStart = Date.now();
-        let targetLineCount = 0;
+        const filename = csvFiles[i].path;
+        const tableName = targetTablename || filename;
+        const fileImportStarttime = Date.now();
         const insertPromises = [];
-        let rowsInserted = 0;
+        let targetInsertionsForFile = 0;
+        let totalRowsInsertedForFile = 0;
 
         try {
-    
+            
             if (clearTableBeforeInsert) {
-                await db.query(`DELETE \`${table}\``);
+                await db.query(`DELETE \`${tableName}\``);
             }
     
-            await db.query(`DEFINE TABLE IF NOT EXISTS \`${table}\` SCHEMALESS`);
+            await db.query(`DEFINE TABLE IF NOT EXISTS \`${tableName}\` SCHEMALESS`);
     
             // Prepare indexes before we do the mass import
             for (let { indexName, fields, isUnique } of indexFields) {
-                await db.query(`DEFINE INDEX IF NOT EXISTS ${indexName} ON \`${table}\` FIELDS ${fields} ${isUnique ? 'UNIQUE' : ''}`);
+                await db.query(`DEFINE INDEX IF NOT EXISTS ${indexName} ON \`${tableName}\` FIELDS ${fields} ${isUnique ? 'UNIQUE' : ''}`);
             }
     
-            console.log("Reading CSV file " + CYAN + csvFilename + GRAY + "…");
-            targetLineCount = csvFiles[i].entries;
-            console.log("Found " + GREEN + targetLineCount.toLocaleString() + GRAY + " records in " + CYAN + csvFilename + RESET);
+            if (!countRecordsToInsertAtStart) {
+                console.log(`${GRAY}Reading CSV file ${CYAN}${filename}${GRAY}…`);
+                targetInsertionsForFile = (await countNewlines(filename, spinner, terminalRefreshRate)) - 1;
+                console.log(`${GRAY}Found ${GREEN}${targetInsertionsForFile.toLocaleString()}${GRAY} records in ${CYAN}${filename}${RESET}`);
+            }
+            else {
+                targetInsertionsForFile = csvFiles[i]?.entries;
+                console.log(`${GRAY}Found ${GREEN}${targetInsertionsForFile.toLocaleString()}${GRAY} records in ${CYAN}${filename}${RESET}`);
+            }
     
             spinner.start();
-    
+            const csvDelimiter = await fingerPrintCSV(filename);
+
             // Limit the buffer chunks to approx. 512K
             // Larger values cause the program to lock momentarily as the data is read.
-            const fileStream = fs.createReadStream('./data/' + csvFilename, { highWaterMark: 512 * 1024 });
-    
+            const fileStream = createReadStream('./data/' + filename, { highWaterMark });
             const parser = parse({
-                delimiter: ",",
+                delimiter: csvDelimiter,
                 headers: headers => headers.map(h => h.toLowerCase().replace(/_([a-z])/g, (match, g) => g.toUpperCase()))
             });
-            const dataStream = fileStream.pipe(parser);
+            fileStream.pipe(parser);
     
             let _i = setInterval(() => {
                 // Prevent adding more than 200 insert promises at any given time
-                if (insertPromises.length > 20) {
+                if (insertPromises.length > maxInsertPromises) {
                     fileStream.pause();
                 }
                 else {
                     fileStream.resume();
                 }
     
-                const progress = rowsInserted / targetLineCount;
-                const barWidth = 
-                    process.stdout.columns > 103 ? 40 : 20;
-                const lChars = Math.ceil(progress * barWidth);
+                const totalProgress = totalInsertions / targetInsertionsForDataset;
+                const totalBarWidth = process.stdout.columns > 103 ? 40 : 20;
+                const totalLChars = Math.floor(totalProgress * totalBarWidth);
+                const totalRChars = totalBarWidth - totalLChars;
+                const totalTimeElapsed = (Date.now() - processStart);
+                const totalTimeEstimate = totalTimeElapsed / totalProgress;
+                const totalTimeEstimateRemaining = totalTimeEstimate - totalTimeElapsed;
+                const totalSpeed = Math.floor(totalInsertions / (totalTimeElapsed / 1000));
+
+                const fileProgress = totalRowsInsertedForFile / targetInsertionsForFile;
+                const barWidth = process.stdout.columns > 103 ? 40 : 20;
+                const lChars = Math.floor(fileProgress * barWidth);
                 const rChars = barWidth - lChars;
-                const totalTimeElapsed = (Date.now() - start);
-                const timeElapsed = (Date.now() - fileStart);
-                const timeEstimate = timeElapsed / progress;
+                const timeElapsed = (Date.now() - fileImportStarttime);
+                const timeEstimate = timeElapsed / fileProgress;
                 const timeEstimateRemaining = timeEstimate - timeElapsed;
-    
-                const speed = Math.floor(rowsInserted / (timeElapsed/1000));
-    
+
+                const speed = Math.floor(totalRowsInsertedForFile / (timeElapsed/1000));
+                
                 spinner.text = [
-                    `[${YELLOW}${printTime(totalTimeElapsed)}(${printTime(timeElapsed)})${RESET}]`,
+                    GRAY + `Job:`,
+                    `${YELLOW}[${printTime(totalTimeElapsed)}]`,
+                    CYAN + ''.padEnd(totalLChars, "━") + GRAY + ''.padEnd(totalRChars, "━"),
+                    BLUE + (totalProgress * 100).toFixed(2) + '%',
+                    GREEN + totalInsertions.toLocaleString() + "/" + CYAN + targetInsertionsForDataset.toLocaleString() + GRAY + "rows",
+                    RED + totalSpeed.toLocaleString() + "/s",
+                    GRAY + "eta",
+                    printTime(totalTimeEstimateRemaining) + GRAY
+                ].join(" ") +
+                '\n' + 
+                [
+                    "File: " + YELLOW + `  ${printTime(timeElapsed)}`,
                     CYAN + ''.padEnd(lChars, "━") + GRAY + ''.padEnd(rChars, "━"),
-                    BLUE + (progress*100).toFixed(2) + '%',
-                    GREEN + rowsInserted.toLocaleString() + "/" + CYAN + targetLineCount.toLocaleString() + GRAY + "rows",
-                    RED + speed + "/s",
+                    BLUE + (fileProgress*100).toFixed(2) + '%',
+                    GREEN + totalRowsInsertedForFile.toLocaleString() + "/" + CYAN + targetInsertionsForFile.toLocaleString() + GRAY + "rows",
+                    RED + speed.toLocaleString() + "/s",
                     GRAY + "eta",
                     printTime(timeEstimateRemaining) + GRAY
                 ].join(" ");
@@ -172,21 +225,21 @@ let totalTargetInsertions: number;
                 // a random one generated upon insertion.
                 if (calculateChecksum) {
                     const checksum = crypto.hash(rowHashAlgorithm, JSON.stringify(data));
+                    data[checksumField] = checksum;
 
-                    if (embedSrcRowSha) {
-                        data[checksumField] = checksum;
-                    }
-
-                    if (deduplicate) {
+                    if (useChecksumAsId) {
                         data.id = checksum;
                     }
                 }
                 if (injectSourceTableAsField) {
-                    data[sourceTableField] = csvFilename;
+                    data[sourceTableField] = filename;
                 }
-                
-                let p = db.insert(table, data)
-                    .then(() => { rowsInserted++; totalInsertions++ });
+
+                const p = db.upsert(tableName, data)
+                    .then(() => {
+                        totalRowsInsertedForFile++;
+                        totalInsertions++;
+                    });
     
                 // Record the promise and purge from the promises array
                 insertPromises.push(p);
@@ -194,37 +247,40 @@ let totalTargetInsertions: number;
     
                 // If we start getting more promises than our target limit, we'll
                 // pause the source data stream until we've dropped below our threshold.
-                if (insertPromises.length > 20) {
+                if (insertPromises.length > maxInsertPromises) {
                     fileStream.pause();
                 }
-            })
+            });
+
+            // This doesn't appear to ever fire.
             parser.on("error", err => {
-                // TODO: What happens to invalid records?
                 console.error(err);
-            })
+            });
     
             // Wait for the data stream to complete
-            await new Promise((res, rej) => {
+            await new Promise<void>((res, rej) => {
                 // datastream.on("end") ?
                 // Do we need to explicitly call something to tell the parser it's done with it's work?
-                parser.on("end", () => {
+                parser.on("end", async () => {
+                    // Let all promises settle before we finalize the import.
+                    await Promise.all([...insertPromises]);
+
+                    clearInterval(_i);
                     spinner.stop();
+
                     console.log([
                         "Successfully Imported",
-                        GREEN + rowsInserted.toLocaleString() + GRAY,
+                        GREEN + totalRowsInsertedForFile.toLocaleString() + GRAY,
                         "of",
-                        CYAN + targetLineCount.toLocaleString(),
-                        BLUE + (rowsInserted / targetLineCount * 100) + '%',
+                        CYAN + targetInsertionsForFile.toLocaleString(),
+                        BLUE + (totalRowsInsertedForFile / targetInsertionsForFile * 100) + '%',
                         GRAY + "records from",
-                        '"' + CYAN + csvFilename + GRAY +'"',
+                        '"' + CYAN + filename + GRAY +'"',
                         "in",
-                        YELLOW + printTime(Date.now() - fileStart) + GRAY
+                        YELLOW + printTime(Date.now() - fileImportStarttime) + GRAY
                     ].join(" "));
-                    clearInterval(_i);
-    
-                    // Let all promises settle before we import the next file.
-                    Promise.all(insertPromises)
-                        .then(() => res(0))
+
+                    res();
                 })
             });
     
@@ -238,37 +294,42 @@ let totalTargetInsertions: number;
             spinner.stop();
             console.error(ex);
             console.error([
-                "Failed to complete import of " + RED + csvFilename,
-                GRAY + "Inserted " + GREEN + rowsInserted + GRAY,
+                "Failed to complete import of " + RED + filename,
+                GRAY + "Inserted " + GREEN + totalRowsInsertedForFile + GRAY,
                 "rows of",
-                CYAN + targetLineCount.toLocaleString() + GRAY + " total",
-                BLUE + (rowsInserted / targetLineCount * 100).toFixed(2) + '%',
+                CYAN + targetInsertionsForFile.toLocaleString() + GRAY + " total",
+                BLUE + (totalRowsInsertedForFile / targetInsertionsForFile * 100).toFixed(2) + '%',
                 GRAY + "records from",
-                CYAN + csvFilename + GRAY,
+                CYAN + filename + GRAY,
                 "in",
-                YELLOW + printTime(Date.now() - fileStart) + GRAY
+                YELLOW + printTime(Date.now() - fileImportStarttime) + GRAY
             ].join(" "));
             throw ex;
         }
     }
 
-    console.error([
+    if (sendBellAtCompletion) {
+        process.stdout.write('\u0007');
+    }
+
+    console.log([
         "Bulk insertion job " + GREEN + "succeeded" + GRAY +".\n",
-        GRAY + "Imported " + GREEN + totalInsertions + GRAY,
+        GRAY + "Imported " + GREEN + totalInsertions.toLocaleString() + GRAY,
         "of",
-        BLUE + totalTargetInsertions + GRAY,
-        "from " + CYAN + csvFiles + GRAY + "total files.\n",
-        "in " + YELLOW + printTime(Date.now() - start) + RESET
+        BLUE + (targetInsertionsForDataset ? targetInsertionsForDataset.toLocaleString() : 'unknown') + GRAY,
+        "from " + CYAN + csvFiles.length + GRAY + " total files.\n",
+        "in " + YELLOW + printTime(Date.now() - processStart) + RESET
     ].join(" "));
 
     process.exit(0);
 })().catch(err => {
     spinner.stop();
+    console.error(err);
     console.error([
         "Bulk insertion job " + RED + "failed" + GRAY + ".\n",
-        GRAY + "Imported " + GREEN + totalInsertions + GRAY,
+        GRAY + "Imported " + GREEN + totalInsertions.toLocaleString() + GRAY,
         "of",
-        BLUE + totalTargetInsertions + GRAY,
+        BLUE + (targetInsertionsForDataset ? targetInsertionsForDataset.toLocaleString() : "unknown") + GRAY,
         "from " + CYAN + csvFiles + GRAY + "total files.\n",
         "in " + YELLOW + printTime(Date.now() - start) + RESET
     ].join(" "));

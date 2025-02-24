@@ -6,6 +6,11 @@ It should support 10+GB CSV files by doing partial reads and minimizing the data
 
 > This has initially been tested with a 140GB dataset of data from the United States EPA division.
 
+## Screenshot
+
+![importing.gif](./assets/importing.gif)
+
+
 ## Prerequisites
  - Install either Bun(>= 1.2.2) or NodeJS (>= v22).
  - Run `npm install` or `bun install` for your respective installation.
@@ -52,12 +57,35 @@ The namespace that data will be inserted into. Must be created before the progra
 The database that data will be inserted into. Must be created before the program runs.
 ### CSV_IMPORT_TABLENAME
 The table that data will be inserted into. If the table doesn't exist a schemaless table will be defined automatically.
-If left blank data will be inserted into tables matching the CSV filename.
-
+If left blank data will be inserted into tables .
+### CSV_CLEAR_TABLE_BEFORE_INSERT
+Set to `true` to clear tables before records are inserted. Default `false`.
+### CSV_TERMINAL_REFRESH_INTERVAL
+The integer amount of time between display refresh calls. Defaults to 50(ms).
+### CSV_BELL_BETWEEN_FILES
+Set to `true` to send ANSI bell packets after each file completes it's import. Defaults to `false`.
+### CSV_BELL_ON_FINISH
+Set to `true` to send ANSI bell packets after each file completes it's import. Defaults to `false`.
+### CSV_COUNT_RECORDS_BEFORE_INSERT
+Set to `false` to disable scanning all CSV files before import. Disabling this will break the overall time estimate. Defaults to `true`. 
+### CSV_INJECT_SOURCE_AS_FIELD
+Set to `false` to disable writing the source CSV filename to the created record. Defaults to `true`.
+### CSV_SOURCE_TABLE_FIELDNAME
+If `CSV_INJECT_SOURCE_AS_FIELD` is enabled, the column name that the CSV filename will be written to. Defaults to `_source`.
+### CSV_READER_HIGHWATERMARK
+The target memory chunk limit in bytes of the CSV file stream reader. Values above 524288 may cause noticeable stuttering in the terminal output stream. Should be at least 2x the byte size of the largest record to import (This prevents stream read stagnation). Defaults to `524288`
+### CSV_CALCULATE_RECORD_CHECKSUM
+Set to `false` to disable checksum processing of imported CSV records. Defaults to `true`.
+### CSV_CHECKSUM_ALGORITHM
+When `CSV_CALCULATE_RECORD_CHECKSUM` is enabled, this specifies the hashing algorithm used. Algorithm must be installed on the system and can be verified by running `node -p "require('crypto').getHashes().join('\n')"`. Defaults to `sha256`.
+### CSV_CHECKSUM_COLUMN_NAME
+The column name that the calculated checksum will be inserted into. If `CSV_USE_CHECKSUM_AS_ID` is set to `true` this will create an additional column. Defaults to `_sha`.
+### CSV_USE_CHECKSUM_AS_ID
+When checksums of records are calculated, Set to `false` to disable setting the record ID based on a checksum of of the record data. Defaults to `true`.
 
 ## Roadmap
 
- - [ ] Enable record fingerprinting and deduplication
+ - [X] Enable record fingerprinting and deduplication
  - [ ] Enable resume upon partial import
  - [ ] Enable failed record logging
  - [ ] Enable custom key transformers
@@ -66,3 +94,6 @@ If left blank data will be inserted into tables matching the CSV filename.
 ## Contributing
 
 PRs are welcome. Yes the codebase is a bit chaotic at the moment. I plan to rewrite this with something like enquirer to provide a much more friendly interface while at the same time keeping direct CLI support. 
+
+## License
+
