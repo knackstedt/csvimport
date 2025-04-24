@@ -10,4 +10,4 @@ export const BLUE = RESET + "\x1b[34m";
 export const MAGENTA = RESET + "\x1b[35m";
 export const CYAN = RESET + BOLD + "\x1b[36m";
 export const WHITE = RESET + "\x1b[37m";
-export const GRAY = RESET + "\x1b[30m";
+export const GRAY = RESET + "\x1b[90m";

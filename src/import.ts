@@ -12,7 +12,7 @@ import { BLUE, CYAN, GRAY, GREEN, RED, RESET, YELLOW } from './ansi';
 const SURREAL_URL = process.env["SURREAL_URL"] || "ws://127.0.0.1:8000";
 const SURREAL_USERNAME = process.env["SURREAL_USERNAME"] || "root";
 const SURREAL_PASSWORD = process.env["SURREAL_PASSWORD"] || "root";
-const database = process.env["SURREAL_TARGET_DATABASE"] || "test";
+const database = process.env["SURREAL_TARGET_DATABASE"] || "test1";
 const namespace = process.env["SURREAL_TARGET_NAMESPACE"] || "test";
 
 
@@ -96,7 +96,7 @@ let targetInsertionsForDataset: number;
     const csvFilesInDataDir = filesInDataDir.filter(f => f.endsWith(".csv"));
     spinner.stop();
 
-    console.log(`Found ${GREEN}${csvFilesInDataDir.length.toLocaleString()}${GRAY} CSV files`);
+    console.log(`${GRAY}Found ${GREEN}${csvFilesInDataDir.length.toLocaleString()}${GRAY} CSV files`);
 
     if (countRecordsToInsertAtStart) {
         // Count all of the records in the entire folder before starting the import 
@@ -235,7 +235,12 @@ let targetInsertionsForDataset: number;
                     data[sourceTableField] = filename;
                 }
 
-                const p = db.upsert(tableName, data)
+                // const p = db.upsert(tableName, data)
+                //     .then(() => {
+                //         totalRowsInsertedForFile++;
+                //         totalInsertions++;
+                //     });
+                const p = db.insert(tableName, [data])
                     .then(() => {
                         totalRowsInsertedForFile++;
                         totalInsertions++;

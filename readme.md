@@ -18,6 +18,10 @@ It should support 10+GB CSV files by doing partial reads and minimizing the data
  - Place your CSV files into the `data/` folder.
  - Run the program from a terminal and overload variables as needed.
 
+> Note: Bun is nearly 2x faster at loading records into the database.
+> In our tests, we found node can handle 8-10K records per second, while Bun
+> can handle around 18-20k records per second.
+
 e.g. for bun
 ```shell
 SURREAL_URL="127.0.0.1:8000" \
