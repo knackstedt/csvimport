@@ -34,7 +34,8 @@ const highWaterMark = parseInt(process.env['CSV_READER_HIGHWATERMARK']) || (512 
 
 const calculateChecksum: boolean = JSON.parse(process.env['CSV_CALCULATE_RECORD_CHECKSUM']?.toLowerCase() || 'true');
 // Algorithm to use when `calculateChecksum` is enabled.
-const rowHashAlgorithm = process.env['CSV_CHECKSUM_ALGORITHM'] || "sha256"; 
+const HASH_ALGORITHM = "sha512"; // STRICT_PQ: fixed strong hash, no env override
+const rowHashAlgorithm = HASH_ALGORITHM; 
 // MUST have calculateChecksum enabled.
 const checksumField = process.env['CSV_CHECKSUM_COLUMN_NAME'] || "_sha"; // Column name in the table for the checksum field.
 // de-duplicate records based on their shasum. This makes their ID a hash of their data.
