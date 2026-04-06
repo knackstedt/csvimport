@@ -101,4 +101,5 @@ When checksums of records are calculated, Set to `false` to disable setting the 
 PRs are welcome. Yes the codebase is a bit chaotic at the moment. I plan to rewrite this with something like enquirer to provide a much more friendly interface while at the same time keeping direct CLI support. 
 
 ## License
+MIT
 
