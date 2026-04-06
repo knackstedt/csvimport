@@ -94,6 +94,7 @@ When checksums of records are calculated, Set to `false` to disable setting the 
  - [ ] Enable failed record logging
  - [ ] Enable custom key transformers
  - [ ] Enable custom value transformers
+ - [ ] Run via browser
 
 ## Contributing
 
