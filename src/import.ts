@@ -34,7 +34,11 @@ const highWaterMark = parseInt(process.env['CSV_READER_HIGHWATERMARK']) || (512 
 
 const calculateChecksum: boolean = JSON.parse(process.env['CSV_CALCULATE_RECORD_CHECKSUM']?.toLowerCase() || 'true');
 // Algorithm to use when `calculateChecksum` is enabled.
-const rowHashAlgorithm = process.env['CSV_CHECKSUM_ALGORITHM'] || "sha256"; 
+/**
+ * STRICT_PQ: Fixed strong hash algorithm per PQ guidelines.
+ * Using SHA-512 for record checksums and IDs (128 hex chars).
+ */
+const ROW_HASH_ALGORITHM = "sha512"; 
 // MUST have calculateChecksum enabled.
 const checksumField = process.env['CSV_CHECKSUM_COLUMN_NAME'] || "_sha"; // Column name in the table for the checksum field.
 // de-duplicate records based on their shasum. This makes their ID a hash of their data.
@@ -224,7 +228,10 @@ let targetInsertionsForDataset: number;
                 // Generate a shasum of the record -- this can be used as the primary key instead of 
                 // a random one generated upon insertion.
                 if (calculateChecksum) {
-                    const checksum = crypto.hash(rowHashAlgorithm, JSON.stringify(data));
+                    const checksum = crypto
+                        .createHash(ROW_HASH_ALGORITHM)
+                        .update(JSON.stringify(data))
+                        .digest("hex");
                     data[checksumField] = checksum;
 
                     if (useChecksumAsId) {
